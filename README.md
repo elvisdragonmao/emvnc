@@ -13,7 +13,8 @@ A native, open-source VNC viewer for macOS. SwiftUI and AppKit on top of a patch
 ## Requirements
 
 - macOS 14 Sonoma or later (developed and tested on macOS 26.6, Apple silicon; release builds are universal)
-- To build: Xcode with Swift 6.3 or later (CI uses Xcode 26.6), **or** just the Command Line Tools with Swift 6.3+
+- To build: Xcode with Swift 6.3 or later (verified with Xcode 27.0; CI uses the `macos-26` image's default Xcode),
+  **or** just the Command Line Tools with Swift 6.3+
 - Docker, only for the integration tests
 
 ## Download
