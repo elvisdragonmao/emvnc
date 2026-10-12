@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# The Docker integration tests (scripts/integration-test.sh) are not run here: GitHub's macOS runners have no
+# Docker. Run them locally before a release.
+
+jobs:
+  test:
+    name: Unit tests
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Run unit tests (RoyalVNCKit fork + EmVNCKit)
+        run: scripts/test.sh
+
+  build:
+    name: Build app
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Build with the Swift Package Manager
+        run: scripts/build-app.sh release
+
+      - name: Build with Xcode (universal)
+        run: scripts/build-xcode.sh
+
+      - name: Check the app bundle
+        run: |
+          app=build/Release/emvnc.app
+          lipo -archs "$app/Contents/MacOS/emvnc"
+          codesign --verify --strict --verbose=2 "$app"
+          plutil -lint "$app/Contents/Info.plist"
+
+      - name: Package
+        run: ditto -c -k --sequesterRsrc --keepParent build/Release/emvnc.app build/emvnc.zip
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: emvnc-${{ github.sha }}
+          path: build/emvnc.zip
+          retention-days: 14
+          if-no-files-found: error
