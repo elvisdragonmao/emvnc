@@ -1,0 +1,15 @@
+# Swift Package Manager
+.build/
+.swiftpm/
+Packages/*/.build/
+Packages/*/.swiftpm/
+
+# App bundle built by scripts/build-app.sh
+build/
+
+# Xcode
+DerivedData/
+xcuserdata/
+*.xcuserstate
+
+.DS_Store
