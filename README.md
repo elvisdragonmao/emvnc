@@ -1,7 +1,23 @@
-# emvnc
+<p align="center">
+  <img src="App/Assets.xcassets/AppIcon.appiconset/icon_256x256@2x.png" width="128" height="128" alt="emvnc app icon">
+</p>
 
-A native, open-source VNC viewer for macOS. SwiftUI and AppKit on top of a patched
-[RoyalVNCKit](https://github.com/royalapplications/royalvnc) — no Electron, no web views.
+<h1 align="center">emvnc</h1>
+
+<p align="center">
+  A native, open-source VNC viewer for macOS.<br>
+  SwiftUI and AppKit on top of a patched <a href="https://github.com/royalapplications/royalvnc">RoyalVNCKit</a> — no Electron, no web views.
+</p>
+
+<p align="center">
+  <a href="https://github.com/elvisdragonmao/emvnc/releases/latest">Download</a> ·
+  <a href="#building">Build from source</a> ·
+  <a href="#using-emvnc">Usage</a>
+</p>
+
+<p align="center">
+  <img src="docs/images/connections.png" width="800" alt="The emvnc window: saved connections shown as cards with a thumbnail of each remote screen">
+</p>
 
 - Saved connections with live thumbnails of the last remote screen, favorites, recents, search, grid and list views
 - VNC Password, Apple Remote Desktop, UltraVNC MS-Logon II, **RSA-AES / RSA-AES-256 (encrypted sessions)**, or no authentication
@@ -9,6 +25,12 @@ A native, open-source VNC viewer for macOS. SwiftUI and AppKit on top of a patch
 - Two-way Unicode text clipboard, scoped to the session you are using
 - Keyboard mapping profiles for Mac and Windows/Linux servers, shortcut pass-through, special key combinations
 - Fit-to-window and actual-size scaling, full screen, automatic reconnect, screenshot history
+
+<p align="center">
+  <img src="docs/images/session.png" width="800" alt="A session window showing a remote Linux desktop, with the session toolbar at the top">
+</p>
+
+<p align="center"><sub>Screenshots show demo machines: XFCE desktops on TigerVNC in Docker.</sub></p>
 
 ## Requirements
 
