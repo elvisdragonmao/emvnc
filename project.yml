@@ -1,0 +1,62 @@
+# XcodeGen spec for emvnc.xcodeproj. Regenerate with `xcodegen generate` after changing targets or settings.
+# The app code lives in the local Swift package Packages/EmVNCKit; this project adds the macOS app bundle.
+name: emvnc
+
+options:
+  bundleIdPrefix: dev.emvnc
+  deploymentTarget:
+    macOS: "14.0"
+  developmentLanguage: en
+  createIntermediateGroups: true
+
+settings:
+  base:
+    MARKETING_VERSION: 1.0.0
+    CURRENT_PROJECT_VERSION: 1
+    SWIFT_VERSION: "5.0"
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    DEAD_CODE_STRIPPING: YES
+
+packages:
+  EmVNCKit:
+    path: Packages/EmVNCKit
+
+targets:
+  emvnc:
+    type: application
+    platform: macOS
+    sources:
+      - path: App
+        excludes:
+          - Info.plist
+          - AppIcon.icns
+    dependencies:
+      - package: EmVNCKit
+        product: EmVNCUI
+    settings:
+      base:
+        PRODUCT_NAME: emvnc
+        PRODUCT_BUNDLE_IDENTIFIER: dev.emvnc.emvnc
+        INFOPLIST_FILE: App/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        # "Sign to Run Locally". Set your team and a Developer ID identity to distribute.
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: "-"
+        ENABLE_HARDENED_RUNTIME: YES
+        COMBINE_HIDPI_IMAGES: YES
+
+schemes:
+  emvnc:
+    build:
+      targets:
+        emvnc: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - package: EmVNCKit/EmVNCCoreTests
+    archive:
+      config: Release
