@@ -14,6 +14,11 @@ public extension VNCError {
 		case ultraVNCMSLogonIIAuthenticationFailed
 		case encryptionFailed
 
+		// emvnc fork additions
+		case noMutuallySupportedSecurityType(offered: [UInt8], requested: [UInt8])
+		case rsaAESHandshakeFailed(reason: String)
+		case serverIdentityRejected
+
 		// MARK: - LocalizedError
 		public var errorDescription: String? {
 			// TODO: Localize
@@ -34,6 +39,16 @@ public extension VNCError {
 					return "UltraVNC MS-Logon II authentication failed."
 				case .encryptionFailed:
 					return "Encryption failed."
+
+				case .noMutuallySupportedSecurityType(let offered, let requested):
+					let offeredNames = offered.map(VNCSecurityTypeInfo.name(of:)).joined(separator: ", ")
+					let requestedNames = requested.map(VNCSecurityTypeInfo.name(of:)).joined(separator: ", ")
+
+					return "The server does not offer a security type this client supports for the selected method. Server offers: \(offeredNames.isEmpty ? "none" : offeredNames). Client accepts: \(requestedNames)."
+				case .rsaAESHandshakeFailed(let reason):
+					return "RSA-AES security handshake failed: \(reason)"
+				case .serverIdentityRejected:
+					return "The server's identity (public key) was not trusted."
 			}
 		}
 	}

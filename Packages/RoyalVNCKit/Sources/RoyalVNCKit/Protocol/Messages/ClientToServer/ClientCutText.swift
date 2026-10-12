@@ -16,7 +16,10 @@ extension VNCProtocol {
 
 extension VNCProtocol.ClientCutText {
 	var data: Data {
-		var latin1TextData = text.data(using: Self.stringEncoding) ?? .init()
+		// emvnc fork: upstream sent an empty string when the text was not representable in Latin-1.
+		// Fall back to UTF-8, which most current servers interpret correctly, instead of dropping the text.
+		let normalizedText = text.replacingOccurrences(of: "\r\n", with: "\n")
+		var latin1TextData = normalizedText.data(using: Self.stringEncoding) ?? Data(normalizedText.utf8)
 		var textLength = latin1TextData.count
 
 		if textLength > UInt32.max {

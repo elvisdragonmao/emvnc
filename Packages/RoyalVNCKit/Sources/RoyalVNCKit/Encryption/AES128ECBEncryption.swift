@@ -5,7 +5,7 @@ import Foundation
 #endif
 
 // MARK: - CryptoSwift Implementation
-@_implementationOnly import CryptoSwift
+internal import CryptoSwift
 
 struct AES128ECBEncryption {
     /// AES-128-ECB
@@ -42,7 +42,7 @@ struct AES128ECBEncryption {
 }
 
 // MARK: - libtomcrypt Implementation
-//@_implementationOnly import libtomcrypt
+//internal import libtomcrypt
     
 //struct AES128ECBEncryption {
 //    static func encrypt(data: Data,

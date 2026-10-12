@@ -25,6 +25,12 @@ extension VNCConnection {
 
 		var areContinuousUpdatesSupported = false
 		var areContinuousUpdatesEnabled = false
+
+		// emvnc fork
+		var offeredSecurityTypes = [UInt8]()
+		var negotiatedSecurityType: UInt8?
+		var serverKeyFingerprint: String?
+		let clipboard = Locked(ExtendedClipboardState())
 	}
 }
 

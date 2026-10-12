@@ -91,6 +91,11 @@ public extension VNCConnection {
 
             updateMouseButtonState(wheel: wheel,
                                    isDown: false)
+
+            // emvnc fork: upstream never sent the release, so the wheel "button" stayed down until the next
+            // pointer event and consecutive steps collapsed into a single click on the server.
+            enqueueMouseEvent(nonNormalizedX: x,
+                              nonNormalizedY: y)
         }
     }
 }

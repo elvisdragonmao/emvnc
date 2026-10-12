@@ -103,13 +103,56 @@ private extension VNCConnection {
 		let serverCutText = try await VNCProtocol.ServerCutText.receive(connection: connection,
 																		logger: logger)
 
-		let text = serverCutText.text
-
 		logger.logDebug("Received Clipboard Text from Server")
 
-		guard settings.isClipboardRedirectionEnabled else { return }
+		// emvnc fork: deliver text to the extended delegate and implement the Extended Clipboard actions
+		switch serverCutText.content {
+			case .text(let text):
+				deliverServerClipboardText(text)
+			case .extended(let flags, let payload):
+				try handleExtendedClipboard(flags: flags, payload: payload)
+		}
+	}
 
-		clipboard.text = text
+	func deliverServerClipboardText(_ text: String) {
+		if let extendedDelegate {
+			extendedDelegate.connection(self, didReceiveClipboardText: text)
+		} else if settings.isClipboardRedirectionEnabled {
+			clipboard.text = text
+		}
+	}
+
+	func handleExtendedClipboard(flags: UInt32, payload: Data) throws {
+		let message = try VNCProtocol.ExtendedClipboard.parse(flags: flags, payload: payload)
+
+		switch message {
+			case .caps(let formats, let actions, let textSize):
+				state.clipboard.withLock {
+					$0.serverCapabilities = .init(formats: formats,
+												  actions: actions,
+												  maximumTextSize: textSize ?? 0)
+				}
+
+				enqueueClientToServerMessage(VNCProtocol.ExtendedClipboard.clientCaps())
+			case .notify(let formats):
+				if formats.contains(.text) {
+					enqueueClientToServerMessage(VNCProtocol.ExtendedClipboard.request())
+				}
+			case .request(let formats):
+				guard formats.contains(.text) else { return }
+
+				let text = state.clipboard.withLock { $0.localText }
+
+				enqueueClientToServerMessage(VNCProtocol.ExtendedClipboard.provide(text: text))
+			case .peek:
+				let hasText = state.clipboard.withLock { $0.localText != nil }
+
+				enqueueClientToServerMessage(VNCProtocol.ExtendedClipboard.notify(hasText: hasText))
+			case .provide(let text):
+				if let text {
+					deliverServerClipboardText(text)
+				}
+		}
 	}
 
 	func handleBellMessage() async throws {

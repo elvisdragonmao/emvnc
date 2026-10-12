@@ -27,6 +27,13 @@ public final class VNCConnection: NSObjectOrAnyObject {
 #endif
 	public weak var delegate: VNCConnectionDelegate?
 
+	// emvnc fork: clipboard + server identity callbacks (see VNCConnection+emvnc.swift)
+	public weak var extendedDelegate: VNCConnectionExtendedDelegate?
+
+	/// emvnc fork: allowed RFB security types in order of preference. `nil` uses
+	/// `VNCSecurityTypeInfo.defaultPreference`. Set before calling `connect()`.
+	public var securityTypePreference: [UInt8]?
+
 #if canImport(ObjectiveC)
 	@objc
 #endif
@@ -70,17 +77,13 @@ public final class VNCConnection: NSObjectOrAnyObject {
 
     var mouseButtonState: VNCProtocol.MousePointerButton = [ ]
 
-    lazy var connection: some NetworkConnection = {
+    // emvnc fork: TransportConnection wraps NWConnection and adds the RSA-AES record layer.
+    lazy var connection: TransportConnection = {
         let connectionSettings = NetworkConnectionSettings(connectionTimeout: 15,
                                                            host: settings.hostname,
                                                            port: settings.port)
 
-        // NOTE: To test SocketNetworkConnection on Darwin (macOS, iOS, etc.), comment out the the #if
-#if canImport(Network)
-        let connection = NWConnection(settings: connectionSettings)
-#else
-		let connection = SocketNetworkConnection(settings: connectionSettings)
-#endif
+        let connection = TransportConnection(settings: connectionSettings)
 
         connection.setStatusUpdateHandler(connectionStatusDidChange)
 
@@ -169,8 +172,6 @@ public final class VNCConnection: NSObjectOrAnyObject {
 			VNCPseudoEncodingType.desktopSize.rawValue,
 			VNCPseudoEncodingType.desktopName.rawValue,
 			VNCPseudoEncodingType.cursor.rawValue,
-			// TODO: Implement
-//			VNCPseudoEncodingType.extendedClipboard.rawValue,
             
             // TODO: Make configurable
 			VNCPseudoEncodingType.compressionLevel6.rawValue
@@ -179,6 +180,11 @@ public final class VNCConnection: NSObjectOrAnyObject {
 		if usesTightEncoding {
             // TODO: Make configurable
 			encs.append(VNCPseudoEncodingType.jpegQualityLevel6.rawValue)
+		}
+
+		// emvnc fork: only advertise the Extended Clipboard when someone consumes clipboard text
+		if extendedDelegate != nil {
+			encs.append(VNCPseudoEncodingType.extendedClipboard.rawValue)
 		}
 
 		let uniqueEncs = encs.uniqued()

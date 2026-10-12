@@ -11,6 +11,10 @@ public enum VNCAuthenticationType: Int {
 	case vnc
 	case appleRemoteDesktop
 	case ultraVNCMSLogonII
+
+	// emvnc fork additions: RSA-AES (RFB security types 5, 6, 129, 130). The server picks the subtype.
+	case rsaAESUsernamePassword
+	case rsaAESPassword
 }
 
 public extension VNCAuthenticationType {
@@ -22,6 +26,10 @@ public extension VNCAuthenticationType {
 				true
 			case .ultraVNCMSLogonII:
 				true
+			case .rsaAESUsernamePassword:
+				true
+			case .rsaAESPassword:
+				false
 		}
 	}
 
@@ -32,6 +40,10 @@ public extension VNCAuthenticationType {
 			case .appleRemoteDesktop:
 				true
 			case .ultraVNCMSLogonII:
+				true
+			case .rsaAESUsernamePassword:
+				true
+			case .rsaAESPassword:
 				true
 		}
 	}

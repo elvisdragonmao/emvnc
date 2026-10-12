@@ -1,0 +1,1954 @@
+diff -ruN -x CSDK upstream/Sources/RoyalVNCKit/Compression/ZlibInflateStream.swift Sources/RoyalVNCKit/Compression/ZlibInflateStream.swift
+--- upstream/Sources/RoyalVNCKit/Compression/ZlibInflateStream.swift
++++ Sources/RoyalVNCKit/Compression/ZlibInflateStream.swift
+@@ -4,7 +4,7 @@
+ import Foundation
+ #endif
+ 
+-@_implementationOnly import Z
++internal import Z
+ 
+ enum ZlibError: Error {
+ 	case unknown(status: Int32, message: String?)
+diff -ruN -x CSDK upstream/Sources/RoyalVNCKit/Compression/ZlibStream.swift Sources/RoyalVNCKit/Compression/ZlibStream.swift
+--- upstream/Sources/RoyalVNCKit/Compression/ZlibStream.swift
++++ Sources/RoyalVNCKit/Compression/ZlibStream.swift
+@@ -4,7 +4,7 @@
+ import Foundation
+ #endif
+ 
+-@_implementationOnly import Z
++internal import Z
+ 
+ final class ZlibStream {
+ 	private let stream: ZlibInflateStream
+diff -ruN -x CSDK upstream/Sources/RoyalVNCKit/Encryption/AES128ECBEncryption.swift Sources/RoyalVNCKit/Encryption/AES128ECBEncryption.swift
+--- upstream/Sources/RoyalVNCKit/Encryption/AES128ECBEncryption.swift
++++ Sources/RoyalVNCKit/Encryption/AES128ECBEncryption.swift
+@@ -5,7 +5,7 @@
+ #endif
+ 
+ // MARK: - CryptoSwift Implementation
+-@_implementationOnly import CryptoSwift
++internal import CryptoSwift
+ 
+ struct AES128ECBEncryption {
+     /// AES-128-ECB
+@@ -42,7 +42,7 @@
+ }
+ 
+ // MARK: - libtomcrypt Implementation
+-//@_implementationOnly import libtomcrypt
++//internal import libtomcrypt
+     
+ //struct AES128ECBEncryption {
+ //    static func encrypt(data: Data,
+diff -ruN -x CSDK upstream/Sources/RoyalVNCKit/Encryption/AESEAX.swift Sources/RoyalVNCKit/Encryption/AESEAX.swift
+--- upstream/Sources/RoyalVNCKit/Encryption/AESEAX.swift
++++ Sources/RoyalVNCKit/Encryption/AESEAX.swift
+@@ -0,0 +1,204 @@
++// emvnc fork addition: AES-EAX authenticated encryption used by the RSA-AES (RA2) security types.
++// EAX = CTR encryption + OMAC (CMAC) authentication, see Bellare, Rogaway, Wagner (2004).
++
++import Foundation
++import CommonCrypto
++
++/// AES in EAX mode with a 16-byte tag. Not thread-safe; use one instance per direction.
++final class AESEAX {
++    static let blockSize = kCCBlockSizeAES128
++    static let tagSize = 16
++
++    private let key: Data
++    private let k1: [UInt8]
++    private let k2: [UInt8]
++
++    init?(key: Data) {
++        guard key.count == kCCKeySizeAES128 || key.count == kCCKeySizeAES256 else {
++            return nil
++        }
++
++        self.key = key
++
++        guard let l = Self.ecbEncrypt(key: key, block: [UInt8](repeating: 0, count: Self.blockSize)) else {
++            return nil
++        }
++
++        let k1 = Self.double(l)
++        self.k1 = k1
++        self.k2 = Self.double(k1)
++    }
++
++    func seal(_ plaintext: Data, nonce: Data, header: Data) -> (ciphertext: Data, tag: Data)? {
++        guard let n = omac(tweak: 0, nonce),
++              let h = omac(tweak: 1, header),
++              let ciphertext = ctr(plaintext, iv: n),
++              let c = omac(tweak: 2, ciphertext) else {
++            return nil
++        }
++
++        var tag = [UInt8](repeating: 0, count: Self.tagSize)
++
++        for i in 0..<Self.tagSize {
++            tag[i] = n[i] ^ h[i] ^ c[i]
++        }
++
++        return (ciphertext, Data(tag))
++    }
++
++    func open(_ ciphertext: Data, nonce: Data, header: Data, tag: Data) -> Data? {
++        guard tag.count == Self.tagSize,
++              let n = omac(tweak: 0, nonce),
++              let h = omac(tweak: 1, header),
++              let c = omac(tweak: 2, ciphertext) else {
++            return nil
++        }
++
++        // Constant-time tag comparison
++        var difference: UInt8 = 0
++        let tagBytes = [UInt8](tag)
++
++        for i in 0..<Self.tagSize {
++            difference |= (n[i] ^ h[i] ^ c[i]) ^ tagBytes[i]
++        }
++
++        guard difference == 0 else {
++            return nil
++        }
++
++        return ctr(ciphertext, iv: n)
++    }
++}
++
++// MARK: - Primitives
++extension AESEAX {
++    /// OMAC^t(M) = CMAC([t]_n || M)
++    func omac(tweak: UInt8, _ message: Data) -> [UInt8]? {
++        var input = [UInt8](repeating: 0, count: Self.blockSize)
++        input[Self.blockSize - 1] = tweak
++        input.append(contentsOf: message)
++
++        return cmac(input)
++    }
++
++    /// CMAC (RFC 4493) computed as the last block of AES-CBC with a zero IV over the subkey-adjusted message.
++    func cmac(_ message: [UInt8]) -> [UInt8]? {
++        let blockSize = Self.blockSize
++        var blocks = message
++        let isComplete = !blocks.isEmpty && blocks.count % blockSize == 0
++
++        if !isComplete {
++            blocks.append(0x80)
++
++            while blocks.count % blockSize != 0 {
++                blocks.append(0)
++            }
++        }
++
++        let lastBlockStart = blocks.count - blockSize
++        let subkey = isComplete ? k1 : k2
++
++        for i in 0..<blockSize {
++            blocks[lastBlockStart + i] ^= subkey[i]
++        }
++
++        guard let output = Self.crypt(mode: kCCModeCBC,
++                                      key: key,
++                                      iv: [UInt8](repeating: 0, count: blockSize),
++                                      input: blocks) else {
++            return nil
++        }
++
++        return Array(output[(output.count - blockSize)...])
++    }
++
++    func ctr(_ input: Data, iv: [UInt8]) -> Data? {
++        guard !input.isEmpty else {
++            return Data()
++        }
++
++        guard let output = Self.crypt(mode: kCCModeCTR,
++                                      key: key,
++                                      iv: iv,
++                                      input: [UInt8](input)) else {
++            return nil
++        }
++
++        return Data(output)
++    }
++
++    static func double(_ block: [UInt8]) -> [UInt8] {
++        var result = [UInt8](repeating: 0, count: block.count)
++        var carry: UInt8 = 0
++
++        for i in stride(from: block.count - 1, through: 0, by: -1) {
++            result[i] = (block[i] << 1) | carry
++            carry = block[i] >> 7
++        }
++
++        if carry != 0 {
++            result[block.count - 1] ^= 0x87
++        }
++
++        return result
++    }
++
++    static func ecbEncrypt(key: Data, block: [UInt8]) -> [UInt8]? {
++        var output = [UInt8](repeating: 0, count: block.count)
++        var moved = 0
++
++        let status = key.withUnsafeBytes { keyBytes in
++            CCCrypt(CCOperation(kCCEncrypt),
++                    CCAlgorithm(kCCAlgorithmAES),
++                    CCOptions(kCCOptionECBMode),
++                    keyBytes.baseAddress, key.count,
++                    nil,
++                    block, block.count,
++                    &output, output.count,
++                    &moved)
++        }
++
++        guard status == kCCSuccess, moved == block.count else {
++            return nil
++        }
++
++        return output
++    }
++
++    static func crypt(mode: Int, key: Data, iv: [UInt8], input: [UInt8]) -> [UInt8]? {
++        var cryptor: CCCryptorRef?
++
++        let createStatus = key.withUnsafeBytes { keyBytes in
++            CCCryptorCreateWithMode(CCOperation(kCCEncrypt),
++                                    CCMode(mode),
++                                    CCAlgorithm(kCCAlgorithmAES),
++                                    CCPadding(ccNoPadding),
++                                    iv,
++                                    keyBytes.baseAddress, key.count,
++                                    nil, 0, 0,
++                                    // CTR uses a big-endian 128-bit counter, which is what EAX specifies
++                                    mode == kCCModeCTR ? CCModeOptions(kCCModeOptionCTR_BE) : 0,
++                                    &cryptor)
++        }
++
++        guard createStatus == kCCSuccess, let cryptor else {
++            return nil
++        }
++
++        defer { CCCryptorRelease(cryptor) }
++
++        var output = [UInt8](repeating: 0, count: input.count)
++        var moved = 0
++
++        let updateStatus = CCCryptorUpdate(cryptor,
++                                           input, input.count,
++                                           &output, output.count,
++                                           &moved)
++
++        guard updateStatus == kCCSuccess, moved == input.count else {
++            return nil
++        }
++
++        return output
++    }
++}
+diff -ruN -x CSDK upstream/Sources/RoyalVNCKit/Encryption/BigNum.swift Sources/RoyalVNCKit/Encryption/BigNum.swift
+--- upstream/Sources/RoyalVNCKit/Encryption/BigNum.swift
++++ Sources/RoyalVNCKit/Encryption/BigNum.swift
+@@ -5,7 +5,7 @@
+ #endif
+ 
+ // MARK: - CryptoSwift Implementation
+-@_implementationOnly import CryptoSwift
++internal import CryptoSwift
+ 
+ final class BigNum {
+     private var bigInt: BigUInteger
+@@ -106,7 +106,7 @@
+ 
+ 
+ // MARK: - libtommath Implementation
+-//@_implementationOnly import libtommath
++//internal import libtommath
+ //
+ //final class BigNum {
+ //	private let num: UnsafeMutablePointer<BIGNUM>
+diff -ruN -x CSDK upstream/Sources/RoyalVNCKit/Encryption/RSAKeys.swift Sources/RoyalVNCKit/Encryption/RSAKeys.swift
+--- upstream/Sources/RoyalVNCKit/Encryption/RSAKeys.swift
++++ Sources/RoyalVNCKit/Encryption/RSAKeys.swift
+@@ -0,0 +1,197 @@
++// emvnc fork addition: RSA helpers for the RSA-AES (RA2) security types, backed by Security.framework.
++
++import Foundation
++import Security
++
++/// An RSA public key in the RA2 wire format: U32 key length in bits, modulus, public exponent
++/// (both big-endian and padded to ceil(bits / 8) bytes).
++struct RA2PublicKey {
++    let bitLength: Int
++    let modulus: [UInt8]
++    let exponent: [UInt8]
++
++    static let minimumBitLength = 1024
++    static let maximumBitLength = 8192
++
++    var byteLength: Int { (bitLength + 7) / 8 }
++
++    /// The serialized key, used both on the wire and as input to the session hashes.
++    var wireRepresentation: Data {
++        var data = Data(capacity: 4 + byteLength * 2)
++        data.append(UInt32(bitLength), bigEndian: true)
++        data.append(contentsOf: Self.leftPad(modulus, to: byteLength))
++        data.append(contentsOf: Self.leftPad(exponent, to: byteLength))
++
++        return data
++    }
++
++    /// PKCS#1 RSAPublicKey DER, the format `SecKeyCreateWithData` expects for RSA public keys.
++    var pkcs1DER: Data {
++        DER.sequence(DER.integer(modulus) + DER.integer(exponent))
++    }
++
++    static func leftPad(_ bytes: [UInt8], to length: Int) -> [UInt8] {
++        let trimmed = Array(bytes.drop(while: { $0 == 0 }))
++
++        guard trimmed.count < length else {
++            return Array(trimmed.suffix(length))
++        }
++
++        return [UInt8](repeating: 0, count: length - trimmed.count) + trimmed
++    }
++}
++
++struct RA2ClientKeyPair {
++    let privateKey: SecKey
++    let publicKey: RA2PublicKey
++
++    static func generate(bitLength: Int = 2048) throws -> Self {
++        let attributes: [CFString: Any] = [
++            kSecAttrKeyType: kSecAttrKeyTypeRSA,
++            kSecAttrKeySizeInBits: bitLength,
++            kSecAttrIsPermanent: false
++        ]
++
++        var error: Unmanaged<CFError>?
++
++        guard let privateKey = SecKeyCreateRandomKey(attributes as CFDictionary, &error),
++              let secPublicKey = SecKeyCopyPublicKey(privateKey),
++              let der = SecKeyCopyExternalRepresentation(secPublicKey, &error) as Data?,
++              let (modulus, exponent) = DER.parseRSAPublicKey(der) else {
++            throw VNCError.authentication(.rsaAESHandshakeFailed(reason: "Failed to generate the client RSA key."))
++        }
++
++        let publicKey = RA2PublicKey(bitLength: bitLength,
++                                     modulus: modulus,
++                                     exponent: exponent)
++
++        return .init(privateKey: privateKey,
++                     publicKey: publicKey)
++    }
++
++    func decrypt(_ data: Data) throws -> Data {
++        var error: Unmanaged<CFError>?
++
++        guard let plaintext = SecKeyCreateDecryptedData(privateKey,
++                                                        .rsaEncryptionPKCS1,
++                                                        data as CFData,
++                                                        &error) as Data? else {
++            throw VNCError.authentication(.rsaAESHandshakeFailed(reason: "Failed to decrypt the server random."))
++        }
++
++        return plaintext
++    }
++}
++
++extension RA2PublicKey {
++    func encrypt(_ data: Data) throws -> Data {
++        let attributes: [CFString: Any] = [
++            kSecAttrKeyType: kSecAttrKeyTypeRSA,
++            kSecAttrKeyClass: kSecAttrKeyClassPublic,
++            kSecAttrKeySizeInBits: bitLength
++        ]
++
++        var error: Unmanaged<CFError>?
++
++        guard let key = SecKeyCreateWithData(pkcs1DER as CFData, attributes as CFDictionary, &error),
++              let ciphertext = SecKeyCreateEncryptedData(key,
++                                                         .rsaEncryptionPKCS1,
++                                                         data as CFData,
++                                                         &error) as Data? else {
++            throw VNCError.authentication(.rsaAESHandshakeFailed(reason: "Failed to encrypt with the server's RSA key."))
++        }
++
++        return Data(Self.leftPad([UInt8](ciphertext), to: byteLength))
++    }
++}
++
++// MARK: - Minimal DER
++enum DER {
++    static func length(_ length: Int) -> [UInt8] {
++        guard length >= 0x80 else {
++            return [ UInt8(length) ]
++        }
++
++        var bytes = [UInt8]()
++        var value = length
++
++        while value > 0 {
++            bytes.insert(UInt8(value & 0xff), at: 0)
++            value >>= 8
++        }
++
++        return [ 0x80 | UInt8(bytes.count) ] + bytes
++    }
++
++    static func integer(_ bigEndianBytes: [UInt8]) -> [UInt8] {
++        var value = Array(bigEndianBytes.drop(while: { $0 == 0 }))
++
++        if value.isEmpty {
++            value = [ 0 ]
++        }
++
++        if value[0] & 0x80 != 0 {
++            value.insert(0, at: 0)
++        }
++
++        return [ 0x02 ] + length(value.count) + value
++    }
++
++    static func sequence(_ contents: [UInt8]) -> Data {
++        Data([ 0x30 ] + length(contents.count) + contents)
++    }
++
++    /// Parses a PKCS#1 RSAPublicKey: SEQUENCE { modulus INTEGER, publicExponent INTEGER }.
++    static func parseRSAPublicKey(_ der: Data) -> (modulus: [UInt8], exponent: [UInt8])? {
++        var reader = Reader(bytes: [UInt8](der))
++
++        guard reader.readTag() == 0x30,
++              reader.readLength() != nil,
++              reader.readTag() == 0x02,
++              let modulusLength = reader.readLength(),
++              let modulus = reader.read(modulusLength),
++              reader.readTag() == 0x02,
++              let exponentLength = reader.readLength(),
++              let exponent = reader.read(exponentLength) else {
++            return nil
++        }
++
++        return (Array(modulus.drop(while: { $0 == 0 })),
++                Array(exponent.drop(while: { $0 == 0 })))
++    }
++
++    struct Reader {
++        let bytes: [UInt8]
++        var index = 0
++
++        mutating func readTag() -> UInt8? {
++            guard index < bytes.count else { return nil }
++            defer { index += 1 }
++
++            return bytes[index]
++        }
++
++        mutating func readLength() -> Int? {
++            guard let first = readTag() else { return nil }
++
++            guard first & 0x80 != 0 else {
++                return Int(first)
++            }
++
++            let count = Int(first & 0x7f)
++
++            guard count > 0, count <= 4, let lengthBytes = read(count) else {
++                return nil
++            }
++
++            return lengthBytes.reduce(0) { ($0 << 8) | Int($1) }
++        }
++
++        mutating func read(_ count: Int) -> ArraySlice<UInt8>? {
++            guard count >= 0, index + count <= bytes.count else { return nil }
++            defer { index += count }
++
++            return bytes[index..<(index + count)]
++        }
++    }
++}
+diff -ruN -x CSDK upstream/Sources/RoyalVNCKit/Encryption/VNCDESEncryption.swift Sources/RoyalVNCKit/Encryption/VNCDESEncryption.swift
+--- upstream/Sources/RoyalVNCKit/Encryption/VNCDESEncryption.swift
++++ Sources/RoyalVNCKit/Encryption/VNCDESEncryption.swift
+@@ -4,7 +4,7 @@
+ import Foundation
+ #endif
+ 
+-@_implementationOnly import d3des
++internal import d3des
+ 
+ struct VNCDESEncryption {
+ 	static func encrypt(data: Data,
+diff -ruN -x CSDK upstream/Sources/RoyalVNCKit/Extensions/Data+Extensions.swift Sources/RoyalVNCKit/Extensions/Data+Extensions.swift
+--- upstream/Sources/RoyalVNCKit/Extensions/Data+Extensions.swift
++++ Sources/RoyalVNCKit/Extensions/Data+Extensions.swift
+@@ -4,8 +4,8 @@
+ import Foundation
+ #endif
+ 
+-//@_implementationOnly import libtomcrypt
+-@_implementationOnly import CryptoSwift
++//internal import libtomcrypt
++internal import CryptoSwift
+ 
+ extension Data {
+ 	mutating func append(_ uint32: UInt32,
+diff -ruN -x CSDK upstream/Sources/RoyalVNCKit/Framebuffer/VNCFramebuffer.swift Sources/RoyalVNCKit/Framebuffer/VNCFramebuffer.swift
+--- upstream/Sources/RoyalVNCKit/Framebuffer/VNCFramebuffer.swift
++++ Sources/RoyalVNCKit/Framebuffer/VNCFramebuffer.swift
+@@ -86,7 +86,8 @@
+ 	let needsColorConversion: Bool
+     
+ #if canImport(IOSurface) && canImport(CoreVideo)
+-    var ioSurface: IOSurface? {
++    // emvnc fork: public so clients can display the surface directly in a CALayer.
++    public var ioSurface: IOSurface? {
+         guard let surfaceAllocator = allocator as? VNCFramebufferIOSurfaceAllocator else {
+             return nil
+         }
+@@ -221,7 +222,7 @@
+         
+         if let ioSurfaceAllocator = self.allocator as? VNCFramebufferIOSurfaceAllocator,
+            let surface = ioSurfaceAllocator.surface {
+-            image = .init(ioSurface: surface as! IOSurfaceRef,
++            image = .init(ioSurface: surface as IOSurfaceRef,
+                           options: ciImageOptions)
+         } else {
+             let data = Data(bytes: surfaceAddress,
+diff -ruN -x CSDK upstream/Sources/RoyalVNCKit/Network/TransportConnection.swift Sources/RoyalVNCKit/Network/TransportConnection.swift
+--- upstream/Sources/RoyalVNCKit/Network/TransportConnection.swift
++++ Sources/RoyalVNCKit/Network/TransportConnection.swift
+@@ -0,0 +1,225 @@
++// emvnc fork addition: a NetworkConnection that can switch to the RA2 (RSA-AES) encrypted record layer
++// after the security handshake. Before encryption is enabled it is a transparent pass-through.
++
++#if canImport(Network)
++import Foundation
++import Dispatch
++import Network
++
++/// Per-direction AES-EAX state. The nonce is a 16-byte little-endian message counter starting at zero.
++final class RA2Cipher {
++    private let eax: AESEAX
++    private var counter = [UInt8](repeating: 0, count: 16)
++
++    init?(key: Data) {
++        guard let eax = AESEAX(key: key) else { return nil }
++
++        self.eax = eax
++    }
++
++    private func nextNonce() -> Data {
++        let nonce = Data(counter)
++
++        for i in 0..<counter.count {
++            counter[i] &+= 1
++
++            if counter[i] != 0 {
++                break
++            }
++        }
++
++        return nonce
++    }
++
++    /// Splits `plaintext` into RA2 records: U16 length, ciphertext, 16-byte MAC.
++    func seal(_ plaintext: Data) throws -> Data {
++        let maximumRecordLength = Int(UInt16.max)
++        var output = Data(capacity: plaintext.count + (plaintext.count / maximumRecordLength + 1) * 18)
++        var offset = plaintext.startIndex
++
++        repeat {
++            let end = min(offset + maximumRecordLength, plaintext.endIndex)
++            let chunk = plaintext[offset..<end]
++
++            var header = Data(capacity: 2)
++            header.append(UInt16(chunk.count), bigEndian: true)
++
++            guard let (ciphertext, tag) = eax.seal(Data(chunk), nonce: nextNonce(), header: header) else {
++                throw VNCError.authentication(.encryptionFailed)
++            }
++
++            output.append(header)
++            output.append(ciphertext)
++            output.append(tag)
++
++            offset = end
++        } while offset < plaintext.endIndex
++
++        return output
++    }
++
++    func open(header: Data, ciphertext: Data, tag: Data) throws -> Data {
++        guard let plaintext = eax.open(ciphertext, nonce: nextNonce(), header: header, tag: tag) else {
++            throw VNCError.authentication(.rsaAESHandshakeFailed(reason: "Message authentication failed (corrupted or tampered data)."))
++        }
++
++        return plaintext
++    }
++}
++
++final class TransportConnection: NetworkConnection {
++    private let base: NWConnection
++    private let lock = NSLock()
++
++    private var sendCipher: RA2Cipher?
++    private var receiveCipher: RA2Cipher?
++
++    private var plaintext = Data()
++    private var plaintextOffset = 0
++
++    init(settings: NetworkConnectionSettings) {
++        let tcpOptions = NWProtocolTCP.Options()
++        tcpOptions.connectionTimeout = settings.connectionTimeout
++        tcpOptions.noDelay = true
++
++        // Detect silently dropped connections (sleep, Wi-Fi changes, VPN drops) instead of waiting forever
++        tcpOptions.enableKeepalive = true
++        tcpOptions.keepaliveIdle = 10
++        tcpOptions.keepaliveInterval = 5
++        tcpOptions.keepaliveCount = 3
++
++        let parameters = NWParameters(tls: nil, tcp: tcpOptions)
++        parameters.expiredDNSBehavior = .allow
++        parameters.serviceClass = .interactiveVideo
++
++        self.base = NWConnection(host: .init(settings.host),
++                                 port: .init(rawValue: settings.port)!,
++                                 using: parameters)
++    }
++
++    var status: NetworkConnectionStatus { base.status }
++    var isReady: Bool { base.isReady }
++
++    var isEncrypted: Bool {
++        lock.withLock { sendCipher != nil }
++    }
++
++    func setStatusUpdateHandler(_ statusUpdateHandler: NetworkConnectionStatusUpdateHandler?) {
++        base.setStatusUpdateHandler(statusUpdateHandler)
++    }
++
++    func cancel() {
++        base.cancel()
++    }
++
++    func start(queue: DispatchQueue) {
++        base.start(queue: queue)
++    }
++
++    /// Every byte read or written after this call goes through the RA2 record layer.
++    func enableEncryption(sendCipher: RA2Cipher, receiveCipher: RA2Cipher) {
++        lock.withLock {
++            self.sendCipher = sendCipher
++            self.receiveCipher = receiveCipher
++            self.plaintext = Data()
++            self.plaintextOffset = 0
++        }
++    }
++
++    /// Used by the RA2ne ("unencrypted") variants where only the handshake is protected.
++    func disableEncryption() {
++        lock.withLock {
++            self.sendCipher = nil
++            self.receiveCipher = nil
++        }
++    }
++}
++
++extension TransportConnection: NetworkConnectionReading {
++    func read(minimumLength: Int,
++              maximumLength: Int) async throws -> Data {
++        guard let receiveCipher = lock.withLock({ self.receiveCipher }) else {
++            return try await base.read(minimumLength: minimumLength,
++                                       maximumLength: maximumLength)
++        }
++
++        let required = max(1, minimumLength)
++
++        while availablePlaintextCount < required {
++            try await receiveRecord(cipher: receiveCipher)
++        }
++
++        return lock.withLock {
++            let count = min(maximumLength, plaintext.count - plaintextOffset)
++            let start = plaintext.startIndex + plaintextOffset
++            let chunk = plaintext.subdata(in: start..<(start + count))
++
++            plaintextOffset += count
++
++            if plaintextOffset == plaintext.count {
++                plaintext = Data()
++                plaintextOffset = 0
++            }
++
++            return chunk
++        }
++    }
++
++    private var availablePlaintextCount: Int {
++        lock.withLock { plaintext.count - plaintextOffset }
++    }
++
++    private func receiveRecord(cipher: RA2Cipher) async throws {
++        let header = try await base.readBuffered(length: 2)
++        let length = Int(header[header.startIndex]) << 8 | Int(header[header.startIndex + 1])
++        let body = try await base.readBuffered(length: length + AESEAX.tagSize)
++
++        let ciphertext = body.prefix(length)
++        let tag = body.suffix(AESEAX.tagSize)
++
++        let decrypted = try cipher.open(header: header,
++                                        ciphertext: Data(ciphertext),
++                                        tag: Data(tag))
++
++        lock.withLock {
++            if plaintextOffset > 0 {
++                plaintext.removeFirst(plaintextOffset)
++                plaintextOffset = 0
++            }
++
++            plaintext.append(decrypted)
++        }
++    }
++}
++
++extension TransportConnection: NetworkConnectionWriting {
++    func write(data: Data) async throws {
++        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
++            // Sealing and enqueueing happen under one lock so record order on the wire matches nonce order,
++            // even though the send and receive loops write concurrently.
++            lock.lock()
++
++            let payload: Data
++
++            do {
++                payload = try sendCipher?.seal(data) ?? data
++            } catch {
++                lock.unlock()
++                continuation.resume(throwing: error)
++
++                return
++            }
++
++            base.send(content: payload, completion: .contentProcessed({ error in
++                if let error {
++                    continuation.resume(throwing: error)
++                } else {
++                    continuation.resume()
++                }
++            }))
++
++            lock.unlock()
++        }
++    }
++}
++#endif
+diff -ruN -x CSDK upstream/Sources/RoyalVNCKit/Protocol/Encodings/Frame/TightEncoding.swift Sources/RoyalVNCKit/Protocol/Encodings/Frame/TightEncoding.swift
+--- upstream/Sources/RoyalVNCKit/Protocol/Encodings/Frame/TightEncoding.swift
++++ Sources/RoyalVNCKit/Protocol/Encodings/Frame/TightEncoding.swift
+@@ -15,7 +15,7 @@
+ #endif
+ 
+ #if canImport(stb_image)
+-@_implementationOnly import stb_image
++internal import stb_image
+ #endif
+ 
+ extension VNCProtocol {
+diff -ruN -x CSDK upstream/Sources/RoyalVNCKit/Protocol/Messages/ClientToServer/ClientCutText.swift Sources/RoyalVNCKit/Protocol/Messages/ClientToServer/ClientCutText.swift
+--- upstream/Sources/RoyalVNCKit/Protocol/Messages/ClientToServer/ClientCutText.swift
++++ Sources/RoyalVNCKit/Protocol/Messages/ClientToServer/ClientCutText.swift
+@@ -16,7 +16,10 @@
+ 
+ extension VNCProtocol.ClientCutText {
+ 	var data: Data {
+-		var latin1TextData = text.data(using: Self.stringEncoding) ?? .init()
++		// emvnc fork: upstream sent an empty string when the text was not representable in Latin-1.
++		// Fall back to UTF-8, which most current servers interpret correctly, instead of dropping the text.
++		let normalizedText = text.replacingOccurrences(of: "\r\n", with: "\n")
++		var latin1TextData = normalizedText.data(using: Self.stringEncoding) ?? Data(normalizedText.utf8)
+ 		var textLength = latin1TextData.count
+ 
+ 		if textLength > UInt32.max {
+diff -ruN -x CSDK upstream/Sources/RoyalVNCKit/Protocol/Messages/ExtendedClipboard.swift Sources/RoyalVNCKit/Protocol/Messages/ExtendedClipboard.swift
+--- upstream/Sources/RoyalVNCKit/Protocol/Messages/ExtendedClipboard.swift
++++ Sources/RoyalVNCKit/Protocol/Messages/ExtendedClipboard.swift
+@@ -0,0 +1,263 @@
++// emvnc fork addition: Extended Clipboard pseudo-encoding (UTF-8 clipboard text).
++// Spec: https://github.com/rfbproto/rfbproto/blob/master/rfbproto.rst#extended-clipboard-pseudo-encoding
++
++import Foundation
++
++internal import Z
++
++extension VNCProtocol {
++    enum ExtendedClipboard {
++        struct Format: OptionSet {
++            let rawValue: UInt32
++
++            static let text = Self(rawValue: 1 << 0)
++            static let rtf = Self(rawValue: 1 << 1)
++            static let html = Self(rawValue: 1 << 2)
++            static let dib = Self(rawValue: 1 << 3)
++            static let files = Self(rawValue: 1 << 4)
++
++            static let mask: UInt32 = 0x0000_ffff
++        }
++
++        struct Action: OptionSet {
++            let rawValue: UInt32
++
++            static let caps = Self(rawValue: 1 << 24)
++            static let request = Self(rawValue: 1 << 25)
++            static let peek = Self(rawValue: 1 << 26)
++            static let notify = Self(rawValue: 1 << 27)
++            static let provide = Self(rawValue: 1 << 28)
++
++            static let mask: UInt32 = 0xff00_0000
++        }
++
++        /// Largest clipboard text the client accepts unsolicited, and the cap for decompressed payloads.
++        static let maximumTextSize = 10 * 1024 * 1024
++        static let maximumDecompressedSize = 32 * 1024 * 1024
++
++        /// An extended ClientCutText message (negative length).
++        struct ClientMessage: VNCSendableMessage {
++            let messageType: UInt8 = 6
++            let flags: UInt32
++            let payload: Data
++
++            var data: Data {
++                var data = Data(capacity: 12 + payload.count)
++                data.append(messageType)
++                data.appendPadding(length: 3)
++                data.append(Int32(-(4 + payload.count)), bigEndian: true)
++                data.append(flags, bigEndian: true)
++                data.append(payload)
++
++                return data
++            }
++
++            func send(connection: NetworkConnectionWriting) async throws {
++                try await connection.write(data: data)
++            }
++        }
++
++        enum Incoming {
++            case caps(formats: Format, actions: Action, textSize: Int?)
++            case request(formats: Format)
++            case peek
++            case notify(formats: Format)
++            case provide(text: String?)
++        }
++
++        // MARK: Outgoing
++        static func clientCaps() -> ClientMessage {
++            let formats: Format = [ .text ]
++            let actions: Action = [ .caps, .request, .peek, .notify, .provide ]
++
++            var sizes = Data()
++            sizes.append(UInt32(maximumTextSize), bigEndian: true)
++
++            return .init(flags: formats.rawValue | actions.rawValue,
++                         payload: sizes)
++        }
++
++        static func notify(hasText: Bool) -> ClientMessage {
++            let formats: Format = hasText ? [ .text ] : []
++
++            return .init(flags: Action.notify.rawValue | formats.rawValue,
++                         payload: .init())
++        }
++
++        static func request() -> ClientMessage {
++            .init(flags: Action.request.rawValue | Format.text.rawValue,
++                  payload: .init())
++        }
++
++        static func provide(text: String?) -> ClientMessage {
++            guard let text else {
++                return .init(flags: Action.provide.rawValue,
++                             payload: deflate(Data()) ?? .init())
++            }
++
++            let textData = encodeText(text)
++
++            var plain = Data(capacity: 4 + textData.count)
++            plain.append(UInt32(textData.count), bigEndian: true)
++            plain.append(textData)
++
++            return .init(flags: Action.provide.rawValue | Format.text.rawValue,
++                         payload: deflate(plain) ?? .init())
++        }
++
++        /// UTF-8 with CRLF line endings and a terminating NUL, as the spec requires.
++        static func encodeText(_ text: String) -> Data {
++            let normalized = text
++                .replacingOccurrences(of: "\r\n", with: "\n")
++                .replacingOccurrences(of: "\r", with: "\n")
++                .replacingOccurrences(of: "\n", with: "\r\n")
++
++            var data = Data(normalized.utf8)
++            data.append(0)
++
++            return data
++        }
++
++        static func decodeText(_ data: Data) -> String {
++            var bytes = data
++
++            if let nul = bytes.firstIndex(of: 0) {
++                bytes = bytes[..<nul]
++            }
++
++            let text = String(decoding: bytes, as: UTF8.self)
++
++            return text.replacingOccurrences(of: "\r\n", with: "\n")
++        }
++
++        static func encodedTextSize(_ text: String) -> Int {
++            encodeText(text).count
++        }
++
++        // MARK: Incoming
++        static func parse(flags: UInt32, payload: Data) throws -> Incoming {
++            let formats = Format(rawValue: flags & Format.mask)
++            let actions = Action(rawValue: flags & Action.mask)
++
++            if actions.contains(.caps) {
++                // One U32 maximum size per format bit that is set, in bit order
++                var textSize: Int?
++                var offset = payload.startIndex
++
++                for bit in 0..<16 {
++                    let format = Format(rawValue: 1 << UInt32(bit))
++
++                    guard formats.contains(format) else { continue }
++                    guard offset + 4 <= payload.endIndex else { break }
++
++                    let size = payload[offset..<(offset + 4)].reduce(0) { ($0 << 8) | Int($1) }
++
++                    if format == .text {
++                        textSize = size
++                    }
++
++                    offset += 4
++                }
++
++                return .caps(formats: formats, actions: actions, textSize: textSize)
++            }
++
++            if actions.contains(.request) {
++                return .request(formats: formats)
++            }
++
++            if actions.contains(.peek) {
++                return .peek
++            }
++
++            if actions.contains(.notify) {
++                return .notify(formats: formats)
++            }
++
++            if actions.contains(.provide) {
++                guard formats.contains(.text) else {
++                    return .provide(text: nil)
++                }
++
++                guard let plain = inflate(payload) else {
++                    throw VNCError.protocol(.zlibDecompress(underlyingError: nil))
++                }
++
++                // Pairs of U32 size + data for each format, in bit order. Text is bit 0, so it comes first.
++                guard plain.count >= 4 else {
++                    throw VNCError.protocol(.invalidData)
++                }
++
++                let start = plain.startIndex
++                let size = plain[start..<(start + 4)].reduce(0) { ($0 << 8) | Int($1) }
++
++                guard plain.count >= 4 + size else {
++                    throw VNCError.protocol(.invalidData)
++                }
++
++                return .provide(text: decodeText(plain[(start + 4)..<(start + 4 + size)]))
++            }
++
++            throw VNCError.protocol(.unexpectedExtendedServerCutTextAction(action: actions.rawValue))
++        }
++
++        // MARK: zlib
++        static func deflate(_ data: Data) -> Data? {
++            var destinationLength = compressBound(uLong(data.count))
++            var destination = [UInt8](repeating: 0, count: Int(destinationLength))
++
++            let status = data.withUnsafeBytes { source in
++                compress2(&destination,
++                          &destinationLength,
++                          source.bindMemory(to: Bytef.self).baseAddress,
++                          uLong(data.count),
++                          Z_DEFAULT_COMPRESSION)
++            }
++
++            guard status == Z_OK else {
++                return nil
++            }
++
++            return Data(destination.prefix(Int(destinationLength)))
++        }
++
++        static func inflate(_ data: Data) -> Data? {
++            var stream = z_stream()
++
++            guard inflateInit_(&stream, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size)) == Z_OK else {
++                return nil
++            }
++
++            defer { inflateEnd(&stream) }
++
++            var output = Data()
++            var chunk = [UInt8](repeating: 0, count: 64 * 1024)
++            var input = [UInt8](data)
++            var status = Z_OK
++
++            input.withUnsafeMutableBufferPointer { inputBuffer in
++                stream.next_in = inputBuffer.baseAddress
++                stream.avail_in = uInt(inputBuffer.count)
++
++                repeat {
++                    chunk.withUnsafeMutableBufferPointer { chunkBuffer in
++                        stream.next_out = chunkBuffer.baseAddress
++                        stream.avail_out = uInt(chunkBuffer.count)
++
++                        status = Z.inflate(&stream, Z_NO_FLUSH)
++
++                        let produced = chunkBuffer.count - Int(stream.avail_out)
++                        output.append(chunkBuffer.baseAddress!, count: produced)
++                    }
++                } while status == Z_OK && output.count <= maximumDecompressedSize && (stream.avail_in > 0 || stream.avail_out == 0)
++            }
++
++            guard status == Z_STREAM_END || (status == Z_OK && stream.avail_in == 0),
++                  output.count <= maximumDecompressedSize else {
++                return nil
++            }
++
++            return output
++        }
++    }
++}
+diff -ruN -x CSDK upstream/Sources/RoyalVNCKit/Protocol/Messages/ServerToClient/ServerCutText.swift Sources/RoyalVNCKit/Protocol/Messages/ServerToClient/ServerCutText.swift
+--- upstream/Sources/RoyalVNCKit/Protocol/Messages/ServerToClient/ServerCutText.swift
++++ Sources/RoyalVNCKit/Protocol/Messages/ServerToClient/ServerCutText.swift
+@@ -1,21 +1,25 @@
+-// swiftlint:disable nesting
+-
+ #if canImport(FoundationEssentials)
+ import FoundationEssentials
+ #else
+ import Foundation
+ #endif
+ 
++// emvnc fork: rewritten. Upstream decoded standard messages as Latin-1 only and did not consume the payload
++// of extended (negative length) messages, which would desynchronise the stream if a server sent one.
+ extension VNCProtocol {
+     struct ServerCutText: VNCReceivableMessage {
+         static let messageType: UInt8 = 3
+ 
+-		static let stringEncoding: String.Encoding = .isoLatin1
++        /// Upper bound for a standard ServerCutText payload; larger messages are treated as protocol errors.
++        static let maximumLength = 64 * 1024 * 1024
+ 
+-        let messageType: UInt8
+-        let text: String
++        enum Content {
++            case text(String)
++            case extended(flags: UInt32, payload: Data)
++        }
+ 
+-		let extended: ExtendedServerCutText?
++        let messageType: UInt8
++        let content: Content
+     }
+ }
+ 
+@@ -24,202 +28,48 @@
+                         logger: VNCLogger) async throws -> Self {
+         try await connection.readPadding(length: 3)
+ 
+-		let length = try await receiveLength(connection: connection,
+-											 logger: logger)
++        let length = Int(try await connection.readInt32())
+ 
+-		if length >= 0 { // Standard Message
+-			let text = try await connection.readString(encoding: Self.stringEncoding,
+-													   length: .init(length))
++        if length >= 0 {
++            guard length <= maximumLength else {
++                throw VNCError.protocol(.invalidData)
++            }
+ 
+-			return .init(messageType: Self.messageType,
+-						 text: text,
+-						 extended: nil)
+-		} else { // Extended Message
+-			let extendedLength = Int32(abs(length))
++            let bytes = try await connection.readBuffered(length: length)
+ 
+-			let extended = try await ExtendedServerCutText.receive(connection: connection,
+-																   logger: logger,
+-																   length: extendedLength)
++            return .init(messageType: messageType,
++                         content: .text(decodeStandardText(bytes)))
++        }
+ 
+-			return .init(messageType: Self.messageType,
+-						 text: "",
+-						 extended: extended)
+-		}
+-    }
+-}
++        let extendedLength = -length
+ 
+-private extension VNCProtocol.ServerCutText {
+-	static func receiveLength(connection: NetworkConnectionReading,
+-							  logger: VNCLogger) async throws -> Int {
+-		let lengthDataLength = MemoryLayout<UInt32>.size
+-		let lengthData = try await connection.read(length: lengthDataLength)
++        guard extendedLength >= 4, extendedLength <= maximumLength else {
++            throw VNCError.protocol(.invalidData)
++        }
+ 
+-		guard lengthData.count == lengthDataLength else {
+-			throw VNCError.protocol(.invalidData)
+-		}
++        let flags = try await connection.readUInt32()
++        let payload = try await connection.readBuffered(length: extendedLength - 4)
+ 
+-		let bigEndianUnsignedLength = lengthData.withUnsafeBytes {
+-			$0.load(as: UInt32.self)
+-		}
++        logger.logDebug("Received extended ServerCutText (flags: \(String(flags, radix: 16)))")
+ 
+-        let endianess = Endianness.current
++        return .init(messageType: messageType,
++                     content: .extended(flags: flags, payload: payload))
++    }
+ 
+-        var length = endianess == .little
+-			? Int(UInt32(bigEndian: bigEndianUnsignedLength))
+-			: Int(bigEndianUnsignedLength)
++    /// The RFB spec mandates ISO 8859-1, but several servers send UTF-8. Bytes that form valid UTF-8 with
++    /// non-ASCII content are decoded as UTF-8; everything else as Latin-1. Text is cut at the first NUL.
++    static func decodeStandardText(_ bytes: Data) -> String {
++        var bytes = bytes
+ 
+-		// TODO: Is that the correct check?
+-		if length > Int32.max {
+-			let bigEndianSignedLength = lengthData.withUnsafeBytes {
+-				$0.load(as: Int32.self)
+-			}
++        if let nul = bytes.firstIndex(of: 0) {
++            bytes = bytes[..<nul]
++        }
+ 
+-			length = endianess == .little
+-				? Int(Int32(bigEndian: bigEndianSignedLength))
+-				: Int(bigEndianSignedLength)
+-		}
++        if bytes.contains(where: { $0 >= 0x80 }),
++           let utf8 = String(data: bytes, encoding: .utf8) {
++            return utf8
++        }
+ 
+-		return length
+-	}
++        return String(data: bytes, encoding: .isoLatin1) ?? ""
++    }
+ }
+-
+-extension VNCProtocol.ServerCutText {
+-	// TODO: WIP
+-	struct ExtendedServerCutText {
+-		let serverCapabilities: ServerCapabilities?
+-
+-		struct ServerCapabilities {
+-			let format: Format
+-			let action: Action
+-		}
+-
+-		struct Format: OptionSet {
+-			let rawValue: UInt32
+-
+-			/// Plain, unformatted text using the UTF-8 encoding. End of line is represented by carriage-return and linefeed / newline pairs (values 13 and 10). The text must be followed by a terminating null even though the length is also explicitly given.
+-			static let text = Self(rawValue: 1)
+-
+-			/// Microsoft Rich Text Format.
+-			static let rtf = Self(rawValue: 1 << 1)
+-
+-			/// Microsoft HTML clipboard fragments.
+-			static let html = Self(rawValue: 1 << 2)
+-
+-			/// Microsoft Device Independent Bitmap v5. A file header must not be included.
+-			static let dib = Self(rawValue: 1 << 3)
+-
+-			/// Currently reserved but not defined.
+-			static let files = Self(rawValue: 1 << 4)
+-		}
+-
+-		struct Action: OptionSet {
+-			let rawValue: UInt32
+-
+-			/// If caps is set then the other bits indicate which formats and actions that the sender is willing to receive.
+-			static let caps = Self(rawValue: 1 << 24)
+-
+-			/// The recipient should respond with a provide message with the clipboard data for the formats indicated in flags. No other data is provided with this message.
+-			static let request = Self(rawValue: 1 << 25)
+-
+-			/// The recipient should send a new notify message indicating which formats are available. No other bits in flags need to be set and no other data is provided with this message.
+-			static let peek = Self(rawValue: 1 << 26)
+-
+-			/// This message indicates which formats are available on the remote side and should be sent whenever the clipboard changes, or as a response to a peek message. The available formats are specified in flags and no other data is provided with this message.
+-			static let notify = Self(rawValue: 1 << 27)
+-
+-			/// This message includes the actual clipboard data and should be sent whenever the clipboard changes and the data for each format is less than the respective specified maximum size, or as a response to a request message.
+-			static let provide = Self(rawValue: 1 << 28)
+-		}
+-
+-		// See https://github.com/novnc/noVNC/blob/master/core/rfb.js#L2136
+-		static func receive(connection: NetworkConnectionReading,
+-							logger: VNCLogger,
+-							length: Int32) async throws -> Self {
+-			let flagsRawValue = try await connection.readUInt32()
+-
+-			let formats: Format = .init(rawValue: flagsRawValue)
+-			let actions: Action = .init(rawValue: flagsRawValue)
+-
+-			let isCaps = actions.contains(.caps)
+-
+-			var serverCapabilities: ServerCapabilities?
+-
+-			if isCaps {
+-				logger.logDebug("ExtendedServerCutText Caps")
+-
+-				var bytesToSkip = 0
+-
+-				var serverFormatCapabilities: Format = [ ]
+-
+-				// Update server format capabilities
+-				for idx: UInt32 in 0..<15 {
+-					let index: UInt32 = 1 << idx
+-					let format = Format(rawValue: index)
+-
+-					let supportsFormat = formats.contains(format)
+-
+-					if supportsFormat {
+-						serverFormatCapabilities.insert(format)
+-
+-						// We don't send unsolicited clipboard, so we ignore the size
+-						bytesToSkip += 4
+-					}
+-				}
+-
+-				var serverActionCapabilities: Action = [ ]
+-
+-				// Update server action capabilities
+-				for idx: UInt32 in 24..<31 {
+-					let index: UInt32 = 1 << idx
+-					let action = Action(rawValue: index)
+-
+-					let supportsAction = actions.contains(action)
+-
+-					if supportsAction {
+-						serverActionCapabilities.insert(action)
+-					}
+-				}
+-
+-				serverCapabilities = .init(format: serverFormatCapabilities,
+-										   action: serverActionCapabilities)
+-
+-				try await connection.readPadding(length: bytesToSkip)
+-
+-				// Caps handling done, send caps with the clients capabilities set as a response
+-				// TODO:
+-				/* let clientActionCapabilities: Action = [
+-					Action.caps,
+-					Action.request,
+-					Action.peek,
+-					Action.notify,
+-					Action.provide
+-				] */
+-
+-				// TODO: Send (for reference, extendedClipboardCaps in novnc: https://github.com/novnc/noVNC/blob/9761278df8f663f64f13b18e901a80bda799d893/core/rfb.js#L2997)
+-			} else if actions == Action.request {
+-				logger.logDebug("ExtendedServerCutText Request")
+-
+-				// TODO
+-			} else if actions == Action.peek {
+-				logger.logDebug("ExtendedServerCutText Peek")
+-
+-				// TODO
+-			} else if actions == Action.notify {
+-				logger.logDebug("ExtendedServerCutText Notify")
+-
+-				// TODO
+-			} else if actions == Action.provide {
+-				logger.logDebug("ExtendedServerCutText Provide")
+-
+-				// TODO
+-			} else {
+-				// TODO:
+-				throw VNCError.protocol(.unexpectedExtendedServerCutTextAction(action: actions.rawValue))
+-			}
+-
+-			return .init(serverCapabilities: serverCapabilities)
+-		}
+-	}
+-}
+-
+-// swiftlint:enable nesting
+diff -ruN -x CSDK upstream/Sources/RoyalVNCKit/Protocol/SecurityTypes/RSAAES/RSAAESAuthentication.swift Sources/RoyalVNCKit/Protocol/SecurityTypes/RSAAES/RSAAESAuthentication.swift
+--- upstream/Sources/RoyalVNCKit/Protocol/SecurityTypes/RSAAES/RSAAESAuthentication.swift
++++ Sources/RoyalVNCKit/Protocol/SecurityTypes/RSAAES/RSAAESAuthentication.swift
+@@ -0,0 +1,163 @@
++// emvnc fork addition: RSA-AES / RSA-AES-256 security types (RealVNC "RA2", also implemented by TigerVNC,
++// neatvnc/wayvnc and others). Spec: https://github.com/rfbproto/rfbproto/blob/master/rfbproto.rst#rsa-aes-security-type
++
++import Foundation
++import CryptoKit
++import Security
++
++extension VNCConnection {
++    func performRSAAESAuthentication(securityType: VNCProtocol.SecurityType) async throws {
++        let uses256 = securityType == .rsaAES256 || securityType == .rsaAES256Unencrypted
++        let keepsEncryption = securityType == .rsaAES || securityType == .rsaAES256
++
++        // 1. Server public key
++        let serverKeyBits = Int(try await connection.readUInt32())
++
++        guard (RA2PublicKey.minimumBitLength...RA2PublicKey.maximumBitLength).contains(serverKeyBits) else {
++            throw VNCError.authentication(.rsaAESHandshakeFailed(reason: "Unsupported server key length (\(serverKeyBits) bits)."))
++        }
++
++        let serverKeyBytes = (serverKeyBits + 7) / 8
++        let serverModulus = try await connection.readBuffered(length: serverKeyBytes)
++        let serverExponent = try await connection.readBuffered(length: serverKeyBytes)
++
++        let serverKey = RA2PublicKey(bitLength: serverKeyBits,
++                                     modulus: [UInt8](serverModulus),
++                                     exponent: [UInt8](serverExponent))
++
++        var serverKeyWire = Data(capacity: 4 + serverKeyBytes * 2)
++        serverKeyWire.append(UInt32(serverKeyBits), bigEndian: true)
++        serverKeyWire.append(serverModulus)
++        serverKeyWire.append(serverExponent)
++
++        try await verifyServerIdentity(serverKeyWire)
++
++        // 2. Client public key
++        let clientKeyPair = try RA2ClientKeyPair.generate()
++        let clientKeyWire = clientKeyPair.publicKey.wireRepresentation
++
++        try await connection.write(data: clientKeyWire)
++
++        // 3. Server random, encrypted with our public key
++        let encryptedServerRandomLength = Int(try await connection.readUInt16())
++
++        guard encryptedServerRandomLength == clientKeyPair.publicKey.byteLength else {
++            throw VNCError.authentication(.rsaAESHandshakeFailed(reason: "Unexpected server random length."))
++        }
++
++        let encryptedServerRandom = try await connection.readBuffered(length: encryptedServerRandomLength)
++        let serverRandom = try clientKeyPair.decrypt(encryptedServerRandom)
++
++        // 4. Client random, encrypted with the server's public key (same size as the server's random)
++        let randomLength = serverRandom.count
++
++        guard randomLength == 16 || randomLength == 32 else {
++            throw VNCError.authentication(.rsaAESHandshakeFailed(reason: "Unexpected server random size."))
++        }
++
++        var clientRandomBytes = [UInt8](repeating: 0, count: randomLength)
++
++        guard SecRandomCopyBytes(kSecRandomDefault, randomLength, &clientRandomBytes) == errSecSuccess else {
++            throw VNCError.authentication(.rsaAESHandshakeFailed(reason: "Failed to generate random bytes."))
++        }
++
++        let clientRandom = Data(clientRandomBytes)
++        let encryptedClientRandom = try serverKey.encrypt(clientRandom)
++
++        var clientRandomMessage = Data(capacity: 2 + encryptedClientRandom.count)
++        clientRandomMessage.append(UInt16(encryptedClientRandom.count), bigEndian: true)
++        clientRandomMessage.append(encryptedClientRandom)
++
++        try await connection.write(data: clientRandomMessage)
++
++        // 5. Session keys; everything from here on is AES-EAX framed
++        let hash: (Data) -> Data = uses256
++            ? { Data(SHA256.hash(data: $0)) }
++            : { Data(Insecure.SHA1.hash(data: $0)) }
++
++        let keyLength = uses256 ? 32 : 16
++        let clientSessionKey = hash(serverRandom + clientRandom).prefix(keyLength)
++        let serverSessionKey = hash(clientRandom + serverRandom).prefix(keyLength)
++
++        guard let sendCipher = RA2Cipher(key: Data(clientSessionKey)),
++              let receiveCipher = RA2Cipher(key: Data(serverSessionKey)) else {
++            throw VNCError.authentication(.encryptionFailed)
++        }
++
++        connection.enableEncryption(sendCipher: sendCipher,
++                                    receiveCipher: receiveCipher)
++
++        // 6. Hash exchange binds both public keys to the session
++        let expectedServerHash = hash(serverKeyWire + clientKeyWire)
++        let receivedServerHash = try await connection.readBuffered(length: expectedServerHash.count)
++
++        guard receivedServerHash == expectedServerHash else {
++            throw VNCError.authentication(.rsaAESHandshakeFailed(reason: "Server hash mismatch."))
++        }
++
++        try await connection.write(data: hash(clientKeyWire + serverKeyWire))
++
++        // 7. Subtype: 1 = username + password, 2 = password only
++        let subtype = try await connection.readUInt8()
++
++        let username: String
++        let password: String
++
++        switch subtype {
++            case 1:
++                let credential = try await askDelegateForUsernamePasswordCredential(authenticationType: .rsaAESUsernamePassword)
++                username = credential.username
++                password = credential.password
++            case 2:
++                let credential = try await askDelegateForPasswordCredential(authenticationType: .rsaAESPassword)
++                username = ""
++                password = credential.password
++            default:
++                throw VNCError.authentication(.rsaAESHandshakeFailed(reason: "Unknown credential subtype \(subtype)."))
++        }
++
++        let usernameData = Data(username.utf8)
++        let passwordData = Data(password.utf8)
++
++        guard usernameData.count <= 255, passwordData.count <= 255 else {
++            throw VNCError.authentication(.rsaAESHandshakeFailed(reason: "Username or password is longer than 255 bytes."))
++        }
++
++        var credentials = Data(capacity: 2 + usernameData.count + passwordData.count)
++        credentials.append(UInt8(usernameData.count))
++        credentials.append(usernameData)
++        credentials.append(UInt8(passwordData.count))
++        credentials.append(passwordData)
++
++        try await connection.write(data: credentials)
++
++        credentials.resetBytes(in: 0..<credentials.count)
++
++        if !keepsEncryption {
++            connection.disableEncryption()
++        }
++    }
++
++    private func verifyServerIdentity(_ serverKeyWire: Data) async throws {
++        let fingerprint = SHA256.hash(data: serverKeyWire)
++            .map { String(format: "%02x", $0) }
++            .joined(separator: ":")
++
++        state.serverKeyFingerprint = fingerprint
++
++        guard let extendedDelegate else {
++            return
++        }
++
++        let trusted = await withCheckedContinuation { continuation in
++            extendedDelegate.connection(self,
++                                        shouldTrustServerKeyWithFingerprint: fingerprint) { trusted in
++                continuation.resume(returning: trusted)
++            }
++        }
++
++        guard trusted else {
++            throw VNCError.authentication(.serverIdentityRejected)
++        }
++    }
++}
+diff -ruN -x CSDK upstream/Sources/RoyalVNCKit/Protocol/SecurityTypes/UltraVNCMSLogonII/UltraVNCMSLogonAuthenticationImpl.swift Sources/RoyalVNCKit/Protocol/SecurityTypes/UltraVNCMSLogonII/UltraVNCMSLogonAuthenticationImpl.swift
+--- upstream/Sources/RoyalVNCKit/Protocol/SecurityTypes/UltraVNCMSLogonII/UltraVNCMSLogonAuthenticationImpl.swift
++++ Sources/RoyalVNCKit/Protocol/SecurityTypes/UltraVNCMSLogonII/UltraVNCMSLogonAuthenticationImpl.swift
+@@ -4,7 +4,7 @@
+ import Foundation
+ #endif
+ 
+-@_implementationOnly import d3des
++internal import d3des
+ 
+ extension VNCProtocol.UltraVNCMSLogonIIAuthentication {
+ 	struct Authentication {
+diff -ruN -x CSDK upstream/Sources/RoyalVNCKit/SDK/Connection/State.swift Sources/RoyalVNCKit/SDK/Connection/State.swift
+--- upstream/Sources/RoyalVNCKit/SDK/Connection/State.swift
++++ Sources/RoyalVNCKit/SDK/Connection/State.swift
+@@ -25,6 +25,12 @@
+ 
+ 		var areContinuousUpdatesSupported = false
+ 		var areContinuousUpdatesEnabled = false
++
++		// emvnc fork
++		var offeredSecurityTypes = [UInt8]()
++		var negotiatedSecurityType: UInt8?
++		var serverKeyFingerprint: String?
++		let clipboard = Locked(ExtendedClipboardState())
+ 	}
+ }
+ 
+diff -ruN -x CSDK upstream/Sources/RoyalVNCKit/SDK/Connection/VNCConnection+API.swift Sources/RoyalVNCKit/SDK/Connection/VNCConnection+API.swift
+--- upstream/Sources/RoyalVNCKit/SDK/Connection/VNCConnection+API.swift
++++ Sources/RoyalVNCKit/SDK/Connection/VNCConnection+API.swift
+@@ -91,6 +91,11 @@
+ 
+             updateMouseButtonState(wheel: wheel,
+                                    isDown: false)
++
++            // emvnc fork: upstream never sent the release, so the wheel "button" stayed down until the next
++            // pointer event and consecutive steps collapsed into a single click on the server.
++            enqueueMouseEvent(nonNormalizedX: x,
++                              nonNormalizedY: y)
+         }
+     }
+ }
+diff -ruN -x CSDK upstream/Sources/RoyalVNCKit/SDK/Connection/VNCConnection+Handshake.swift Sources/RoyalVNCKit/SDK/Connection/VNCConnection+Handshake.swift
+--- upstream/Sources/RoyalVNCKit/SDK/Connection/VNCConnection+Handshake.swift
++++ Sources/RoyalVNCKit/SDK/Connection/VNCConnection+Handshake.swift
+@@ -99,28 +99,21 @@
+ 	}
+ 
+ 	func decideSecurityType(supportedTypes: VNCProtocol.SecurityTypes) async throws {
+-		let chosenSecurityType: VNCProtocol.SecurityType
++		// emvnc fork: choose from an explicit, caller-configurable preference list. Upstream also selected
++		// "Tight" (16), which it never implemented, leaving the stream in an undefined state.
++		let offered = supportedTypes.authTypes
++		let requested = (securityTypePreference ?? VNCSecurityTypeInfo.defaultPreference)
++			.filter { VNCSecurityTypeInfo.implemented.contains($0) }
+ 
+-		let supportedSecurityTypes = supportedTypes.securityTypes
++		state.offeredSecurityTypes = offered
+ 
+-		if supportedSecurityTypes.contains(.none) {
+-			chosenSecurityType = .none
+-		} else if supportedSecurityTypes.contains(.diffieHellman) {
+-			chosenSecurityType = .diffieHellman
+-		} else if supportedSecurityTypes.contains(.ultraVNCMSLogonII) {
+-			chosenSecurityType = .ultraVNCMSLogonII
+-		} else if supportedSecurityTypes.contains(.vnc) {
+-			chosenSecurityType = .vnc
+-		} else if supportedSecurityTypes.contains(.tight) {
+-			chosenSecurityType = .tight
+-		} else {
+-			chosenSecurityType = .invalid
++		guard let chosenRawValue = requested.first(where: { offered.contains($0) }),
++			  let chosenSecurityType = VNCProtocol.SecurityType(rawValue: chosenRawValue) else {
++			throw VNCError.authentication(.noMutuallySupportedSecurityType(offered: offered,
++																			requested: requested))
+ 		}
+ 
+-		guard chosenSecurityType != .invalid,
+-			  supportedTypes.securityTypes.contains(chosenSecurityType) else {
+-			throw VNCError.authentication(.clientCouldNotDecideOnSecurityType)
+-		}
++		state.negotiatedSecurityType = chosenRawValue
+ 
+ 		try await sendAuthenticationData(securityType: chosenSecurityType)
+ 	}
+@@ -158,6 +151,10 @@
+ 				shouldRequestSecurityTypeResult = true
+ 
+ 				try await performUltraVNCMSLogonIIAuthentication()
++			case .rsaAES, .rsaAES256, .rsaAESUnencrypted, .rsaAES256Unencrypted:
++				shouldRequestSecurityTypeResult = true
++
++				try await performRSAAESAuthentication(securityType: securityType)
+ //			case .tight:
+ //				shouldRequestSecurityTypeResult = true
+ //				isTightSecurityEnabled = true
+diff -ruN -x CSDK upstream/Sources/RoyalVNCKit/SDK/Connection/VNCConnection+Receive.swift Sources/RoyalVNCKit/SDK/Connection/VNCConnection+Receive.swift
+--- upstream/Sources/RoyalVNCKit/SDK/Connection/VNCConnection+Receive.swift
++++ Sources/RoyalVNCKit/SDK/Connection/VNCConnection+Receive.swift
+@@ -103,13 +103,56 @@
+ 		let serverCutText = try await VNCProtocol.ServerCutText.receive(connection: connection,
+ 																		logger: logger)
+ 
+-		let text = serverCutText.text
+-
+ 		logger.logDebug("Received Clipboard Text from Server")
+ 
+-		guard settings.isClipboardRedirectionEnabled else { return }
++		// emvnc fork: deliver text to the extended delegate and implement the Extended Clipboard actions
++		switch serverCutText.content {
++			case .text(let text):
++				deliverServerClipboardText(text)
++			case .extended(let flags, let payload):
++				try handleExtendedClipboard(flags: flags, payload: payload)
++		}
++	}
+ 
+-		clipboard.text = text
++	func deliverServerClipboardText(_ text: String) {
++		if let extendedDelegate {
++			extendedDelegate.connection(self, didReceiveClipboardText: text)
++		} else if settings.isClipboardRedirectionEnabled {
++			clipboard.text = text
++		}
++	}
++
++	func handleExtendedClipboard(flags: UInt32, payload: Data) throws {
++		let message = try VNCProtocol.ExtendedClipboard.parse(flags: flags, payload: payload)
++
++		switch message {
++			case .caps(let formats, let actions, let textSize):
++				state.clipboard.withLock {
++					$0.serverCapabilities = .init(formats: formats,
++												  actions: actions,
++												  maximumTextSize: textSize ?? 0)
++				}
++
++				enqueueClientToServerMessage(VNCProtocol.ExtendedClipboard.clientCaps())
++			case .notify(let formats):
++				if formats.contains(.text) {
++					enqueueClientToServerMessage(VNCProtocol.ExtendedClipboard.request())
++				}
++			case .request(let formats):
++				guard formats.contains(.text) else { return }
++
++				let text = state.clipboard.withLock { $0.localText }
++
++				enqueueClientToServerMessage(VNCProtocol.ExtendedClipboard.provide(text: text))
++			case .peek:
++				let hasText = state.clipboard.withLock { $0.localText != nil }
++
++				enqueueClientToServerMessage(VNCProtocol.ExtendedClipboard.notify(hasText: hasText))
++			case .provide(let text):
++				if let text {
++					deliverServerClipboardText(text)
++				}
++		}
+ 	}
+ 
+ 	func handleBellMessage() async throws {
+diff -ruN -x CSDK upstream/Sources/RoyalVNCKit/SDK/Connection/VNCConnection+emvnc.swift Sources/RoyalVNCKit/SDK/Connection/VNCConnection+emvnc.swift
+--- upstream/Sources/RoyalVNCKit/SDK/Connection/VNCConnection+emvnc.swift
++++ Sources/RoyalVNCKit/SDK/Connection/VNCConnection+emvnc.swift
+@@ -0,0 +1,118 @@
++// emvnc fork addition: APIs a full client needs that upstream does not expose — negotiated security
++// metadata, server identity verification, and clipboard text in both directions without the built-in
++// NSPasteboard polling (which would push one Mac clipboard to every open session).
++
++import Foundation
++
++public protocol VNCConnectionExtendedDelegate: AnyObject {
++    /// Clipboard text received from the server (standard or Extended Clipboard). Line endings are LF.
++    /// Called on a background queue.
++    func connection(_ connection: VNCConnection,
++                    didReceiveClipboardText text: String)
++
++    /// Called during RSA-AES handshakes with the SHA-256 fingerprint of the server's public key.
++    /// Call `completion(false)` to abort the connection. Called on a background queue.
++    func connection(_ connection: VNCConnection,
++                    shouldTrustServerKeyWithFingerprint fingerprint: String,
++                    completion: @escaping (Bool) -> Void)
++}
++
++public extension VNCConnection {
++    /// Security types the server offered during the handshake (raw RFB values).
++    var offeredSecurityTypes: [UInt8] {
++        state.offeredSecurityTypes
++    }
++
++    /// The security type the client selected, once negotiated.
++    var negotiatedSecurityType: UInt8? {
++        state.negotiatedSecurityType
++    }
++
++    /// Whether all traffic of this session is encrypted (RSA-AES / RSA-AES-256).
++    var isSessionEncrypted: Bool {
++        connection.isEncrypted
++    }
++
++    /// SHA-256 fingerprint of the server's RSA key, if an RSA-AES handshake took place.
++    var serverKeyFingerprint: String? {
++        state.serverKeyFingerprint
++    }
++
++    var desktopName: String? {
++        state.desktopName
++    }
++
++    /// Whether the server confirmed support for the Extended Clipboard pseudo-encoding (UTF-8 clipboard).
++    var isExtendedClipboardActive: Bool {
++        state.clipboard.withLock { $0.serverCapabilities != nil }
++    }
++
++    /// Sends clipboard text to the server. Uses the Extended Clipboard (UTF-8) when the server supports it,
++    /// otherwise a standard ClientCutText message.
++    func sendClipboardText(_ text: String) {
++        let action = state.clipboard.withLock { clipboard -> ClipboardSendAction in
++            clipboard.localText = text
++
++            guard let capabilities = clipboard.serverCapabilities else {
++                return .legacy
++            }
++
++            let size = VNCProtocol.ExtendedClipboard.encodedTextSize(text)
++
++            if capabilities.actions.contains(.provide),
++               capabilities.formats.contains(.text),
++               size <= capabilities.maximumTextSize {
++                return .provide
++            }
++
++            if capabilities.actions.contains(.notify) {
++                return .notify
++            }
++
++            return .legacy
++        }
++
++        switch action {
++            case .legacy:
++                enqueueClientToServerMessage(VNCProtocol.ClientCutText(text: text))
++            case .provide:
++                enqueueClientToServerMessage(VNCProtocol.ExtendedClipboard.provide(text: text))
++            case .notify:
++                enqueueClientToServerMessage(VNCProtocol.ExtendedClipboard.notify(hasText: true))
++        }
++    }
++}
++
++enum ClipboardSendAction {
++    case legacy
++    case provide
++    case notify
++}
++
++/// Protected Extended Clipboard state shared by the receive loop and API callers.
++struct ExtendedClipboardState {
++    struct ServerCapabilities {
++        let formats: VNCProtocol.ExtendedClipboard.Format
++        let actions: VNCProtocol.ExtendedClipboard.Action
++        let maximumTextSize: Int
++    }
++
++    var serverCapabilities: ServerCapabilities?
++    var localText: String?
++}
++
++final class Locked<Value>: @unchecked Sendable {
++    private let lock = NSLock()
++    private var value: Value
++
++    init(_ value: Value) {
++        self.value = value
++    }
++
++    func withLock<Result>(_ body: (inout Value) throws -> Result) rethrows -> Result {
++        lock.lock()
++        defer { lock.unlock() }
++
++        return try body(&value)
++    }
++}
+diff -ruN -x CSDK upstream/Sources/RoyalVNCKit/SDK/Connection/VNCConnection.swift Sources/RoyalVNCKit/SDK/Connection/VNCConnection.swift
+--- upstream/Sources/RoyalVNCKit/SDK/Connection/VNCConnection.swift
++++ Sources/RoyalVNCKit/SDK/Connection/VNCConnection.swift
+@@ -27,6 +27,13 @@
+ #endif
+ 	public weak var delegate: VNCConnectionDelegate?
+ 
++	// emvnc fork: clipboard + server identity callbacks (see VNCConnection+emvnc.swift)
++	public weak var extendedDelegate: VNCConnectionExtendedDelegate?
++
++	/// emvnc fork: allowed RFB security types in order of preference. `nil` uses
++	/// `VNCSecurityTypeInfo.defaultPreference`. Set before calling `connect()`.
++	public var securityTypePreference: [UInt8]?
++
+ #if canImport(ObjectiveC)
+ 	@objc
+ #endif
+@@ -70,17 +77,13 @@
+ 
+     var mouseButtonState: VNCProtocol.MousePointerButton = [ ]
+ 
+-    lazy var connection: some NetworkConnection = {
++    // emvnc fork: TransportConnection wraps NWConnection and adds the RSA-AES record layer.
++    lazy var connection: TransportConnection = {
+         let connectionSettings = NetworkConnectionSettings(connectionTimeout: 15,
+                                                            host: settings.hostname,
+                                                            port: settings.port)
+ 
+-        // NOTE: To test SocketNetworkConnection on Darwin (macOS, iOS, etc.), comment out the the #if
+-#if canImport(Network)
+-        let connection = NWConnection(settings: connectionSettings)
+-#else
+-		let connection = SocketNetworkConnection(settings: connectionSettings)
+-#endif
++        let connection = TransportConnection(settings: connectionSettings)
+ 
+         connection.setStatusUpdateHandler(connectionStatusDidChange)
+ 
+@@ -169,8 +172,6 @@
+ 			VNCPseudoEncodingType.desktopSize.rawValue,
+ 			VNCPseudoEncodingType.desktopName.rawValue,
+ 			VNCPseudoEncodingType.cursor.rawValue,
+-			// TODO: Implement
+-//			VNCPseudoEncodingType.extendedClipboard.rawValue,
+             
+             // TODO: Make configurable
+ 			VNCPseudoEncodingType.compressionLevel6.rawValue
+@@ -179,6 +180,11 @@
+ 		if usesTightEncoding {
+             // TODO: Make configurable
+ 			encs.append(VNCPseudoEncodingType.jpegQualityLevel6.rawValue)
++		}
++
++		// emvnc fork: only advertise the Extended Clipboard when someone consumes clipboard text
++		if extendedDelegate != nil {
++			encs.append(VNCPseudoEncodingType.extendedClipboard.rawValue)
+ 		}
+ 
+ 		let uniqueEncs = encs.uniqued()
+diff -ruN -x CSDK upstream/Sources/RoyalVNCKit/SDK/Error/AuthenticationError.swift Sources/RoyalVNCKit/SDK/Error/AuthenticationError.swift
+--- upstream/Sources/RoyalVNCKit/SDK/Error/AuthenticationError.swift
++++ Sources/RoyalVNCKit/SDK/Error/AuthenticationError.swift
+@@ -14,6 +14,11 @@
+ 		case ultraVNCMSLogonIIAuthenticationFailed
+ 		case encryptionFailed
+ 
++		// emvnc fork additions
++		case noMutuallySupportedSecurityType(offered: [UInt8], requested: [UInt8])
++		case rsaAESHandshakeFailed(reason: String)
++		case serverIdentityRejected
++
+ 		// MARK: - LocalizedError
+ 		public var errorDescription: String? {
+ 			// TODO: Localize
+@@ -34,6 +39,16 @@
+ 					return "UltraVNC MS-Logon II authentication failed."
+ 				case .encryptionFailed:
+ 					return "Encryption failed."
++
++				case .noMutuallySupportedSecurityType(let offered, let requested):
++					let offeredNames = offered.map(VNCSecurityTypeInfo.name(of:)).joined(separator: ", ")
++					let requestedNames = requested.map(VNCSecurityTypeInfo.name(of:)).joined(separator: ", ")
++
++					return "The server does not offer a security type this client supports for the selected method. Server offers: \(offeredNames.isEmpty ? "none" : offeredNames). Client accepts: \(requestedNames)."
++				case .rsaAESHandshakeFailed(let reason):
++					return "RSA-AES security handshake failed: \(reason)"
++				case .serverIdentityRejected:
++					return "The server's identity (public key) was not trusted."
+ 			}
+ 		}
+ 	}
+diff -ruN -x CSDK upstream/Sources/RoyalVNCKit/SDK/VNCAuthenticationType.swift Sources/RoyalVNCKit/SDK/VNCAuthenticationType.swift
+--- upstream/Sources/RoyalVNCKit/SDK/VNCAuthenticationType.swift
++++ Sources/RoyalVNCKit/SDK/VNCAuthenticationType.swift
+@@ -11,6 +11,10 @@
+ 	case vnc
+ 	case appleRemoteDesktop
+ 	case ultraVNCMSLogonII
++
++	// emvnc fork additions: RSA-AES (RFB security types 5, 6, 129, 130). The server picks the subtype.
++	case rsaAESUsernamePassword
++	case rsaAESPassword
+ }
+ 
+ public extension VNCAuthenticationType {
+@@ -22,6 +26,10 @@
+ 				true
+ 			case .ultraVNCMSLogonII:
+ 				true
++			case .rsaAESUsernamePassword:
++				true
++			case .rsaAESPassword:
++				false
+ 		}
+ 	}
+ 
+@@ -32,6 +40,10 @@
+ 			case .appleRemoteDesktop:
+ 				true
+ 			case .ultraVNCMSLogonII:
++				true
++			case .rsaAESUsernamePassword:
++				true
++			case .rsaAESPassword:
+ 				true
+ 		}
+ 	}
+diff -ruN -x CSDK upstream/Sources/RoyalVNCKit/SDK/VNCSecurityTypeInfo.swift Sources/RoyalVNCKit/SDK/VNCSecurityTypeInfo.swift
+--- upstream/Sources/RoyalVNCKit/SDK/VNCSecurityTypeInfo.swift
++++ Sources/RoyalVNCKit/SDK/VNCSecurityTypeInfo.swift
+@@ -0,0 +1,57 @@
++// emvnc fork addition: public metadata about RFB security types so clients can explain negotiation results.
++
++import Foundation
++
++public enum VNCSecurityTypeInfo {
++    public static let none: UInt8 = 1
++    public static let vncAuthentication: UInt8 = 2
++    public static let rsaAES: UInt8 = 5
++    public static let rsaAESUnencrypted: UInt8 = 6
++    public static let appleRemoteDesktop: UInt8 = 30
++    public static let ultraVNCMSLogonII: UInt8 = 113
++    public static let rsaAES256: UInt8 = 129
++    public static let rsaAES256Unencrypted: UInt8 = 130
++
++    /// Security types this library can complete a handshake for.
++    public static let implemented: [UInt8] = [
++        none, vncAuthentication, rsaAES, rsaAESUnencrypted, appleRemoteDesktop,
++        ultraVNCMSLogonII, rsaAES256, rsaAES256Unencrypted
++    ]
++
++    /// Order used when the client does not restrict the security type.
++    /// "None" stays first to match upstream behaviour (no credential prompt when the server allows it);
++    /// encrypting types are preferred over the ones that only protect the credentials.
++    public static let defaultPreference: [UInt8] = [
++        none, rsaAES256, rsaAES, appleRemoteDesktop, ultraVNCMSLogonII,
++        vncAuthentication, rsaAES256Unencrypted, rsaAESUnencrypted
++    ]
++
++    /// Whether the session traffic after authentication is encrypted.
++    public static func encryptsSession(_ securityType: UInt8) -> Bool {
++        securityType == rsaAES || securityType == rsaAES256
++    }
++
++    public static func name(of securityType: UInt8) -> String {
++        switch securityType {
++            case 0: "Invalid"
++            case none: "None"
++            case vncAuthentication: "VNC Password"
++            case rsaAES: "RSA-AES"
++            case rsaAESUnencrypted: "RSA-AES (handshake only)"
++            case 13: "RSA-AES Two-step"
++            case 16: "Tight"
++            case 17: "Ultra"
++            case 18: "TLS"
++            case 19: "VeNCrypt"
++            case 20: "SASL"
++            case 22: "xvp"
++            case appleRemoteDesktop: "Apple Remote Desktop"
++            case 33, 35, 36: "Apple (\(securityType))"
++            case ultraVNCMSLogonII: "UltraVNC MS-Logon II"
++            case rsaAES256: "RSA-AES-256"
++            case rsaAES256Unencrypted: "RSA-AES-256 (handshake only)"
++            case 133: "RSA-AES-256 Two-step"
++            default: "Type \(securityType)"
++        }
++    }
++}

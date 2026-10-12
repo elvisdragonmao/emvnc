@@ -2,6 +2,7 @@
 
 // Vendored fork of RoyalVNCKit (https://github.com/royalapplications/royalvnc).
 // Upstream revision: 090b96eddeee183e9fec293c5cd881d302a4349d (2026-09-21, repository archived 2026-10).
+// See PATCHES.md for every change made against upstream.
 
 import PackageDescription
 
@@ -39,6 +40,10 @@ let package = Package(
 
             swiftSettings: [
                 .swiftLanguageMode(.v5)
+            ],
+
+            linkerSettings: [
+                .linkedFramework("Security")
             ]
         ),
 
@@ -46,6 +51,15 @@ let package = Package(
 
         .target(name: "Z", linkerSettings: [
             .linkedLibrary("z")
-        ])
+        ]),
+
+        // emvnc fork addition: tests for the RSA-AES crypto, record layer, Extended Clipboard and pointer input
+        .testTarget(
+            name: "RoyalVNCKitTests",
+            dependencies: [ "RoyalVNCKit" ],
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        )
     ]
 )

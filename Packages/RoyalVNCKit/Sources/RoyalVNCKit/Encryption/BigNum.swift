@@ -5,7 +5,7 @@ import Foundation
 #endif
 
 // MARK: - CryptoSwift Implementation
-@_implementationOnly import CryptoSwift
+internal import CryptoSwift
 
 final class BigNum {
     private var bigInt: BigUInteger
@@ -106,7 +106,7 @@ extension BigNum {
 
 
 // MARK: - libtommath Implementation
-//@_implementationOnly import libtommath
+//internal import libtommath
 //
 //final class BigNum {
 //	private let num: UnsafeMutablePointer<BIGNUM>

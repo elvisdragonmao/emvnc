@@ -86,7 +86,8 @@ public final class VNCFramebuffer: NSObjectOrAnyObject {
 	let needsColorConversion: Bool
     
 #if canImport(IOSurface) && canImport(CoreVideo)
-    var ioSurface: IOSurface? {
+    // emvnc fork: public so clients can display the surface directly in a CALayer.
+    public var ioSurface: IOSurface? {
         guard let surfaceAllocator = allocator as? VNCFramebufferIOSurfaceAllocator else {
             return nil
         }
@@ -221,7 +222,7 @@ public extension VNCFramebuffer {
         
         if let ioSurfaceAllocator = self.allocator as? VNCFramebufferIOSurfaceAllocator,
            let surface = ioSurfaceAllocator.surface {
-            image = .init(ioSurface: surface as! IOSurfaceRef,
+            image = .init(ioSurface: surface as IOSurfaceRef,
                           options: ciImageOptions)
         } else {
             let data = Data(bytes: surfaceAddress,

@@ -99,28 +99,21 @@ private extension VNCConnection {
 	}
 
 	func decideSecurityType(supportedTypes: VNCProtocol.SecurityTypes) async throws {
-		let chosenSecurityType: VNCProtocol.SecurityType
+		// emvnc fork: choose from an explicit, caller-configurable preference list. Upstream also selected
+		// "Tight" (16), which it never implemented, leaving the stream in an undefined state.
+		let offered = supportedTypes.authTypes
+		let requested = (securityTypePreference ?? VNCSecurityTypeInfo.defaultPreference)
+			.filter { VNCSecurityTypeInfo.implemented.contains($0) }
 
-		let supportedSecurityTypes = supportedTypes.securityTypes
+		state.offeredSecurityTypes = offered
 
-		if supportedSecurityTypes.contains(.none) {
-			chosenSecurityType = .none
-		} else if supportedSecurityTypes.contains(.diffieHellman) {
-			chosenSecurityType = .diffieHellman
-		} else if supportedSecurityTypes.contains(.ultraVNCMSLogonII) {
-			chosenSecurityType = .ultraVNCMSLogonII
-		} else if supportedSecurityTypes.contains(.vnc) {
-			chosenSecurityType = .vnc
-		} else if supportedSecurityTypes.contains(.tight) {
-			chosenSecurityType = .tight
-		} else {
-			chosenSecurityType = .invalid
+		guard let chosenRawValue = requested.first(where: { offered.contains($0) }),
+			  let chosenSecurityType = VNCProtocol.SecurityType(rawValue: chosenRawValue) else {
+			throw VNCError.authentication(.noMutuallySupportedSecurityType(offered: offered,
+																			requested: requested))
 		}
 
-		guard chosenSecurityType != .invalid,
-			  supportedTypes.securityTypes.contains(chosenSecurityType) else {
-			throw VNCError.authentication(.clientCouldNotDecideOnSecurityType)
-		}
+		state.negotiatedSecurityType = chosenRawValue
 
 		try await sendAuthenticationData(securityType: chosenSecurityType)
 	}
@@ -158,6 +151,10 @@ private extension VNCConnection {
 				shouldRequestSecurityTypeResult = true
 
 				try await performUltraVNCMSLogonIIAuthentication()
+			case .rsaAES, .rsaAES256, .rsaAESUnencrypted, .rsaAES256Unencrypted:
+				shouldRequestSecurityTypeResult = true
+
+				try await performRSAAESAuthentication(securityType: securityType)
 //			case .tight:
 //				shouldRequestSecurityTypeResult = true
 //				isTightSecurityEnabled = true
