@@ -18,7 +18,8 @@ let package = Package(
     ],
 
     products: [
-        .library(name: "EmVNCCore", targets: [ "EmVNCCore" ])
+        .library(name: "EmVNCCore", targets: [ "EmVNCCore" ]),
+        .executable(name: "vncprobe", targets: [ "vncprobe" ])
     ],
 
     dependencies: [
@@ -32,6 +33,13 @@ let package = Package(
             dependencies: [
                 .product(name: "RoyalVNCKit", package: "RoyalVNCKit")
             ],
+            swiftSettings: swiftSettings
+        ),
+
+        // Headless integration harness: connect, authenticate, capture the framebuffer, exercise input/clipboard
+        .executableTarget(
+            name: "vncprobe",
+            dependencies: [ "EmVNCCore" ],
             swiftSettings: swiftSettings
         ),
 
