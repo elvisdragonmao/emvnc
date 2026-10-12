@@ -19,6 +19,8 @@ let package = Package(
 
     products: [
         .library(name: "EmVNCCore", targets: [ "EmVNCCore" ]),
+        .library(name: "EmVNCUI", targets: [ "EmVNCUI" ]),
+        .executable(name: "emvnc", targets: [ "EmVNCLauncher" ]),
         .executable(name: "vncprobe", targets: [ "vncprobe" ])
     ],
 
@@ -33,6 +35,20 @@ let package = Package(
             dependencies: [
                 .product(name: "RoyalVNCKit", package: "RoyalVNCKit")
             ],
+            swiftSettings: swiftSettings
+        ),
+
+        // SwiftUI scenes, views and view models
+        .target(
+            name: "EmVNCUI",
+            dependencies: [ "EmVNCCore" ],
+            swiftSettings: swiftSettings
+        ),
+
+        // Entry point for `swift run emvnc` and scripts/build-app.sh (the Xcode app target has its own)
+        .executableTarget(
+            name: "EmVNCLauncher",
+            dependencies: [ "EmVNCUI" ],
             swiftSettings: swiftSettings
         ),
 
